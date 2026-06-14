@@ -2,7 +2,7 @@ package quran
 
 import (
 	"context"
-	"net/url"
+	"fmt"
 	"strings"
 
 	"github.com/tamnd/any-cli/kit"
@@ -19,9 +19,6 @@ import (
 // quran:// URIs by routing to the operations Register installs. The same
 // Domain also builds the standalone quran binary (see cli.NewApp), so the
 // binary and a host share one source of truth.
-//
-// This is the scaffold's starting point: one resource type, "page", served by a
-// resolver op and a list op. Add your real types here as you model the site.
 func init() { kit.Register(Domain{}) }
 
 // Domain is the quran driver. It carries no state; the per-run client is
@@ -36,36 +33,40 @@ func (Domain) Info() kit.DomainInfo {
 		Hosts:  []string{Host},
 		Identity: kit.Identity{
 			Binary: "quran",
-			Short:  "A command line for quran.",
-			Long: `A command line for quran.
+			Short:  "A command line for the Quran API.",
+			Long: `A command line for the Quran API.
 
-quran reads public quran data over plain HTTPS, shapes it into
-clean records, and prints output that pipes into the rest of your tools. No API
-key, nothing to run alongside it.`,
-			Site: Host,
+quran reads public Quran data from api.quran.com over plain HTTPS, shapes it
+into clean records, and prints output that pipes into the rest of your tools.
+No API key, nothing to run alongside it.`,
+			Site: "quran.com",
 			Repo: "https://github.com/tamnd/quran-cli",
 		},
 	}
 }
 
-// Register installs the client factory and every operation onto app. A resolver
-// op (Single) names its own record type and answers `ant get`; a List op
-// enumerates a parent resource's members and answers `ant ls`.
+// Register installs the client factory and every operation onto app.
 func (Domain) Register(app *kit.App) {
 	app.SetClient(newClient)
 
-	// Resolver op: one record per id, the home of `quran page` and
-	// `ant get quran://page/<id>`.
-	kit.Handle(app, kit.OpMeta{Name: "page", Group: "read", Single: true,
-		Summary: "Fetch a page by path or URL", URIType: "page", Resolver: true,
-		Args: []kit.Arg{{Name: "ref", Help: "page path or URL"}}}, getPage)
+	kit.Handle(app, kit.OpMeta{Name: "chapters", Group: "read", List: true,
+		Summary: "List all 114 chapters of the Quran", URIType: "chapter"},
+		listChapters)
 
-	// List op: members of a page, the home of `quran links` and `ant ls`.
-	// It emits page stubs, so every listed member is itself an addressable
-	// quran://page/ URI a host can follow.
-	kit.Handle(app, kit.OpMeta{Name: "links", Group: "read", List: true,
-		Summary: "List the pages a page links to", URIType: "page",
-		Args: []kit.Arg{{Name: "ref", Help: "page path or URL"}}}, listLinks)
+	kit.Handle(app, kit.OpMeta{Name: "chapter", Group: "read", Single: true,
+		Summary: "Fetch a chapter by number (1-114)", URIType: "chapter", Resolver: true,
+		Args: []kit.Arg{{Name: "id", Help: "chapter number (1-114)"}}},
+		getChapter)
+
+	kit.Handle(app, kit.OpMeta{Name: "verses", Group: "read", List: true,
+		Summary: "List verses in a chapter", URIType: "verse",
+		Args: []kit.Arg{{Name: "chapter", Help: "chapter number (1-114)"}}},
+		listVerses)
+
+	kit.Handle(app, kit.OpMeta{Name: "verse", Group: "read", Single: true,
+		Summary: "Fetch a single verse by key (e.g. '1:1' or '2:255')", URIType: "verse", Resolver: true,
+		Args: []kit.Arg{{Name: "key", Help: "verse key (e.g. '1:1' or '2:255')"}}},
+		getVerse)
 }
 
 // newClient builds the client from the host-resolved config, so a host and the
@@ -88,86 +89,137 @@ func newClient(_ context.Context, cfg kit.Config) (any, error) {
 }
 
 // --- inputs ---
-//
-// Each handler takes a typed input struct. kit fills the fields from the tags:
-// kit:"arg" is a positional argument, kit:"flag,inherit" binds the framework's
-// shared flag of the same name, and kit:"inject" receives the client newClient
-// builds.
 
-type pageRef struct {
-	Ref    string  `kit:"arg" help:"page path or URL"`
+type chaptersInput struct {
 	Client *Client `kit:"inject"`
 }
 
-type listRef struct {
-	Ref    string  `kit:"arg" help:"page path or URL"`
-	Limit  int     `kit:"flag,inherit" help:"max results"`
+type chapterInput struct {
+	ID     int     `kit:"arg" help:"chapter number (1-114)"`
+	Client *Client `kit:"inject"`
+}
+
+type versesInput struct {
+	Chapter int     `kit:"arg" help:"chapter number (1-114)"`
+	Limit   int     `kit:"flag,inherit" help:"max verses" default:"10"`
+	Client  *Client `kit:"inject"`
+}
+
+type verseInput struct {
+	Key    string  `kit:"arg" help:"verse key (e.g. '1:1' or '2:255')"`
 	Client *Client `kit:"inject"`
 }
 
 // --- handlers ---
 
-func getPage(ctx context.Context, in pageRef, emit func(*Page) error) error {
-	p, err := in.Client.GetPage(ctx, pagePath(in.Ref))
+func listChapters(ctx context.Context, in chaptersInput, emit func(*Chapter) error) error {
+	chapters, err := in.Client.ListChapters(ctx)
 	if err != nil {
 		return mapErr(err)
 	}
-	return emit(p)
-}
-
-func listLinks(ctx context.Context, in listRef, emit func(*Page) error) error {
-	pages, err := in.Client.PageLinks(ctx, pagePath(in.Ref), in.Limit)
-	if err != nil {
-		return mapErr(err)
-	}
-	for _, p := range pages {
-		if err := emit(p); err != nil {
+	for i := range chapters {
+		if err := emit(&chapters[i]); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+func getChapter(ctx context.Context, in chapterInput, emit func(*Chapter) error) error {
+	ch, err := in.Client.GetChapter(ctx, in.ID)
+	if err != nil {
+		return mapErr(err)
+	}
+	return emit(ch)
+}
+
+func listVerses(ctx context.Context, in versesInput, emit func(*Verse) error) error {
+	limit := in.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+	verses, err := in.Client.ListVerses(ctx, in.Chapter, limit)
+	if err != nil {
+		return mapErr(err)
+	}
+	for i := range verses {
+		if err := emit(&verses[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func getVerse(ctx context.Context, in verseInput, emit func(*Verse) error) error {
+	v, err := in.Client.GetVerse(ctx, in.Key)
+	if err != nil {
+		return mapErr(err)
+	}
+	return emit(v)
+}
+
 // --- Resolver: the URI-native string functions, pure and network-free ---
 
-// Classify turns any accepted input — a bare path or a full quran.com URL —
-// into the canonical (type, id), so `ant resolve` and `ant url` touch no network.
+// Classify turns any accepted input into the canonical (type, id).
+// "N:N" format (e.g. "1:1", "2:255") → ("verse", input)
+// Pure numeric → ("chapter", input)
+// Otherwise → ("query", input)
 func (Domain) Classify(input string) (uriType, id string, err error) {
-	id = pagePath(input)
-	if id == "" {
+	input = strings.TrimSpace(input)
+	if input == "" {
 		return "", "", errs.Usage("unrecognized quran reference: %q", input)
 	}
-	return "page", id, nil
+	// verse key: digits:digits
+	if isVerseKey(input) {
+		return "verse", input, nil
+	}
+	// bare chapter number
+	if isNumeric(input) {
+		return "chapter", input, nil
+	}
+	return "query", input, nil
 }
 
 // Locate is the inverse: the live https URL for a (type, id).
 func (Domain) Locate(uriType, id string) (string, error) {
-	if uriType != "page" {
+	switch uriType {
+	case "verse":
+		parts := strings.SplitN(id, ":", 2)
+		if len(parts) != 2 {
+			return "", errs.Usage("invalid verse key %q, expected chapter:verse", id)
+		}
+		return fmt.Sprintf("https://quran.com/%s/%s", parts[0], parts[1]), nil
+	case "chapter":
+		return fmt.Sprintf("https://quran.com/%s", id), nil
+	default:
 		return "", errs.Usage("quran has no resource type %q", uriType)
 	}
-	return BaseURL + "/" + strings.Trim(id, "/"), nil
 }
 
 // --- helpers ---
 
-// pagePath turns any accepted input into the canonical page id: the path of a
-// full URL on this host, or a bare path with its slashes trimmed.
-func pagePath(input string) string {
-	input = strings.TrimSpace(input)
-	if u, err := url.Parse(input); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
-		return strings.Trim(u.Path, "/")
+func isVerseKey(s string) bool {
+	idx := strings.Index(s, ":")
+	if idx < 1 || idx == len(s)-1 {
+		return false
 	}
-	return strings.Trim(input, "/")
+	return isNumeric(s[:idx]) && isNumeric(s[idx+1:])
+}
+
+func isNumeric(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // mapErr converts a library error into the kit error kind that carries the right
-// exit code, so a host renders the same outcomes the standalone binary does. As
-// you add sentinel errors to the library, map them here, for example:
-//
-//	case errors.Is(err, ErrNotFound):
-//		return errs.NotFound("%s", err.Error())
-//	case errors.Is(err, ErrRateLimited):
-//		return errs.RateLimited("%s", err.Error())
+// exit code, so a host renders the same outcomes the standalone binary does.
 func mapErr(err error) error {
 	return err
 }

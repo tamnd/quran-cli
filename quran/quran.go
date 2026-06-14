@@ -1,5 +1,5 @@
 // Package quran is the library behind the quran command line:
-// the HTTP client, request shaping, and the typed data models for quran.
+// the HTTP client, request shaping, and the typed data models for api.quran.com.
 //
 // The Client here is the spine every command shares. It sets a real
 // User-Agent, paces requests so a busy session stays polite, and retries the
@@ -9,27 +9,51 @@ package quran
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
-	"strings"
 	"time"
 )
 
-// DefaultUserAgent identifies the client to quran. A real, honest
+// DefaultUserAgent identifies the client to api.quran.com. A real, honest
 // User-Agent is both polite and the thing most likely to keep you unblocked.
 const DefaultUserAgent = "quran/dev (+https://github.com/tamnd/quran-cli)"
 
-// Host is the site this client talks to, and the host the URI driver in
-// domain.go claims. The scaffold points it at quran.com; change it once you
-// know the real endpoints you want to read.
-const Host = "quran.com"
+// Host is the API host this client talks to, and the host the URI driver in
+// domain.go claims.
+const Host = "api.quran.com"
 
 // BaseURL is the root every request is built from.
 const BaseURL = "https://" + Host
 
-// Client talks to quran over HTTP.
+// TranslatedName is the English (or requested-language) name of a chapter.
+type TranslatedName struct {
+	LanguageName string `json:"language_name"`
+	Name         string `json:"name"`
+}
+
+// Chapter is a single chapter (surah) of the Quran.
+type Chapter struct {
+	ID              int            `kit:"id" json:"id"`
+	NameSimple      string         `json:"name_simple"`
+	NameArabic      string         `json:"name_arabic"`
+	VersesCount     int            `json:"verses_count"`
+	RevelationPlace string         `json:"revelation_place"`
+	TranslatedName  TranslatedName `json:"translated_name"`
+}
+
+// Verse is a single verse (ayah) of the Quran.
+type Verse struct {
+	ID          int    `kit:"id" json:"id"`
+	VerseNumber int    `json:"verse_number"`
+	VerseKey    string `json:"verse_key"`
+	TextUthmani string `json:"text_uthmani"`
+	PageNumber  int    `json:"page_number"`
+	JuzNumber   int    `json:"juz_number"`
+}
+
+// Client talks to api.quran.com over HTTP.
 type Client struct {
 	HTTP      *http.Client
 	UserAgent string
@@ -123,78 +147,62 @@ func backoff(attempt int) time.Duration {
 	return d
 }
 
-// Page is the scaffold's one example record: a single page, addressed by the
-// path that names it on quran.com. It is a stand-in for the typed records you
-// will model from the real quran endpoints. The kit struct tags make it
-// addressable as a resource URI (see domain.go): ID is the URI id, and Body is
-// the long text `quran cat` and the Markdown export print.
-type Page struct {
-	ID    string `json:"id" kit:"id"`
-	URL   string `json:"url"`
-	Title string `json:"title,omitempty"`
-	Body  string `json:"body,omitempty" kit:"body"`
+// ListChapters returns all 114 chapters of the Quran.
+func (c *Client) ListChapters(ctx context.Context) ([]Chapter, error) {
+	body, err := c.Get(ctx, BaseURL+"/api/v4/chapters")
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Chapters []Chapter `json:"chapters"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("decode chapters: %w", err)
+	}
+	return resp.Chapters, nil
 }
 
-// GetPage fetches one page by its path (for example "wiki/Go") and returns it as
-// a record. The scaffold keeps a plain-text preview of the response as the body;
-// replace the parsing with the real fields once you know the endpoint's shape.
-func (c *Client) GetPage(ctx context.Context, path string) (*Page, error) {
-	path = strings.Trim(path, "/")
-	url := BaseURL + "/" + path
+// GetChapter returns a single chapter by its number (1–114).
+func (c *Client) GetChapter(ctx context.Context, id int) (*Chapter, error) {
+	body, err := c.Get(ctx, fmt.Sprintf("%s/api/v4/chapters/%d", BaseURL, id))
+	if err != nil {
+		return nil, err
+	}
+	var ch Chapter
+	if err := json.Unmarshal(body, &ch); err != nil {
+		return nil, fmt.Errorf("decode chapter: %w", err)
+	}
+	return &ch, nil
+}
+
+// ListVerses returns up to limit verses from the given chapter.
+func (c *Client) ListVerses(ctx context.Context, chapter, limit int) ([]Verse, error) {
+	url := fmt.Sprintf("%s/api/v4/verses/by_chapter/%d?language=en&words=false&per_page=%d", BaseURL, chapter, limit)
 	body, err := c.Get(ctx, url)
 	if err != nil {
 		return nil, err
 	}
-	return &Page{ID: path, URL: url, Title: path, Body: pageText(body)}, nil
+	var resp struct {
+		Verses []Verse `json:"verses"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("decode verses: %w", err)
+	}
+	return resp.Verses, nil
 }
 
-// PageLinks fetches a page and returns the same-host pages it links to, as page
-// stubs. It shows the member-listing pattern the URI driver relies on: every
-// stub carries enough (an id and a URL) to be addressed and followed on its own.
-func (c *Client) PageLinks(ctx context.Context, path string, limit int) ([]*Page, error) {
-	path = strings.Trim(path, "/")
-	body, err := c.Get(ctx, BaseURL+"/"+path)
+// GetVerse returns a single verse by its key (e.g. "1:1" or "2:255").
+func (c *Client) GetVerse(ctx context.Context, key string) (*Verse, error) {
+	url := fmt.Sprintf("%s/api/v4/verses/by_key/%s?language=en&words=false", BaseURL, key)
+	body, err := c.Get(ctx, url)
 	if err != nil {
 		return nil, err
 	}
-	var out []*Page
-	seen := map[string]bool{}
-	for _, p := range linkPaths(body) {
-		if seen[p] {
-			continue
-		}
-		seen[p] = true
-		out = append(out, &Page{ID: p, URL: BaseURL + "/" + p})
-		if limit > 0 && len(out) >= limit {
-			break
-		}
+	var resp struct {
+		Verse Verse `json:"verse"`
 	}
-	return out, nil
-}
-
-var (
-	hrefRE = regexp.MustCompile(`href="(/[^":#?]+)"`)
-	tagRE  = regexp.MustCompile(`<[^>]+>`)
-)
-
-// linkPaths pulls the relative link targets out of an HTML response, so a list
-// op can turn each into an addressable page stub.
-func linkPaths(body []byte) []string {
-	var out []string
-	for _, m := range hrefRE.FindAllSubmatch(body, -1) {
-		if p := strings.Trim(string(m[1]), "/"); p != "" {
-			out = append(out, p)
-		}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("decode verse: %w", err)
 	}
-	return out
-}
-
-// pageText reduces an HTML response to a short plain-text preview, a stand-in
-// for the typed extract a real endpoint would hand you.
-func pageText(body []byte) string {
-	s := strings.Join(strings.Fields(tagRE.ReplaceAllString(string(body), " ")), " ")
-	if len(s) > 500 {
-		s = s[:500]
-	}
-	return s
+	return &resp.Verse, nil
 }
