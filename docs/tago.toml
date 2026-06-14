@@ -1,0 +1,10 @@
+title       = "quran"
+baseURL     = "https://quran-cli.tamnd.com/"
+description = "A command line for quran."
+contentDir  = "content"
+outputDir   = "public"
+theme       = "tago-doks"
+syntaxHighlight = "true"
+
+[params]
+github = "https://github.com/tamnd/quran-cli"
